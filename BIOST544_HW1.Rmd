@@ -1,0 +1,197 @@
+---
+title: "BIOST544_HW1"
+author: "Qin Li"
+date: "10/14/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+options(digits = 3)
+set.seed(1014)
+library(knitr)
+getwd()
+```
+
+
+## 1.
+
+First is to split patients based on their ages. We will have five age groups. 
+
+```{r}
+
+data <- read.table("data/nsclc-modified.txt", header=TRUE)
+
+data_age <- data %>% filter(age >=50 )%>% select_all() %>% mutate(age_group = 
+                                              case_when(age %in% c(50:54) ~ "50+",
+                                                        age %in% c(55:59) ~ "55+",
+                                                        age %in% c(60:64) ~ "60+",
+                                                        age %in% c(65:69) ~ "65+",
+                                                        age >= 70 ~ "70+"))
+Age_group <- unique(data_age$age_group)
+
+```
+
+We could take out people who are in the treatment group, and try a series of survival probability for each age group, given the 95% CI. Results as follows:
+
+```{r}
+# a function form the sampling distribution based on number of people in treated group and
+# the probability of people survived past 400 days
+calc_sample_dist <- function(pi){
+  nsamp <- 10000
+  sample_counts <- rbinom(nsamp, num_treated, pi)
+  sample_means <- sample_counts/num_treated
+  return(sample_means)
+}
+
+df_subage <- matrix(data = NA, ncol = 4, nrow = length(Age_group))
+colnames(df_subage) <- c("Age groups", "Prob. of survival past 400 days",
+                         "Lower CI","Higher CI")
+
+for (i in 1:length(Age_group)){
+  resp.prop.treat <- data_age %>%
+                    filter(tx == 1, age_group == Age_group[i]) %>%
+                    summarise(prop = mean(survival.past.400)) %>%
+                    .$prop
+  ### Grab Data for Patients on Treatment Arm ###
+  num_treated <- data_age %>%
+                filter(tx==1,age_group == Age_group[i]) %>% 
+                summarise(num = n()) %>% 
+                .$num
+  candidate_pi_101 <- seq(from = 0, to = 1, length.out = 101)
+  percentiles_101 <- c()
+  for(pi in candidate_pi_101){
+    samp_dist <- calc_sample_dist(pi)
+    percentile <- mean(samp_dist <= resp.prop.treat)
+    percentiles_101 <- c(percentiles_101,percentile)
+  }
+  consistent_pi <- candidate_pi_101[(percentiles_101 >= 0.025) & (percentiles_101 <= 0.975)]
+  lower_bound <- min(consistent_pi)
+  upper_bound <- max(consistent_pi)
+  
+  df_subage[i,] <- c(Age_group[i],round(resp.prop.treat,2),lower_bound,upper_bound)
+}
+
+table_subage <- kable(df_subage, caption = 'Probability of tx survive and CI')
+table_subage
+
+```
+
+## 2.
+
+We can have the null hypothesis that there is no treatment effect between the two treatments. Therefore, the 
+
+
+```{r}
+set.seed(1)
+
+# to get a data frame that contains the pooled proportion of people survived past 400 days, 
+# the proportion difference of peole survived past 400 days between two treatments
+# the number of people in treatment group for each age group
+# the number of people in control group for each age group
+
+prop.summary <- function(dat,Age_group){
+
+  pooled_prop <- rep(NA,length(Age_group))
+  diffs <- rep(NA,length(Age_group))
+  n_tx <- rep(NA,length(Age_group))
+  n_cl <- rep(NA,length(Age_group))
+  for (i in 1:length(Age_group)){
+    dat_sub <- dat %>% filter(age_group == Age_group[i]) 
+    
+    pooled_prop[i] <- dat_sub %>%
+                      summarise(prop = mean(survival.past.400)) %>%
+                      .$prop
+    
+    resp.prop.treat <- dat_sub %>%
+                    filter(tx == 1) %>%
+                    summarise(prop = mean(survival.past.400)) %>%
+                    .$prop
+    resp.prop.control <- dat_sub %>%
+                    filter(tx == 0) %>%
+                    summarise(prop = mean(survival.past.400)) %>%
+                    .$prop
+    diffs[i] <- resp.prop.treat - resp.prop.control
+    n_tx[i] <- dat_sub %>%
+                      filter(tx == 1) %>% nrow()
+    n_cl[i] <- dat_sub %>%
+                      filter(tx == 0) %>% nrow()
+  }
+  
+  result <- data.frame(Age_group = Age_group,
+                       prop_diffs = diffs,
+                       pooled_prop = pooled_prop,
+                       n_tx = n_tx,
+                       n_cl = n_cl)
+  return(result)
+}
+
+q1_df <- prop.summary(data_age,Age_group)
+
+q1_df
+```
+
+We ran simulated 10000 trials to get the sampling distribution based on our null hypothesis that the two treatments has no difference for each sub groups. Based on the histograms below, we could see that the treatment has a stronger effect on age group of 50+ and 60+ compare to other age groups. 
+
+```{r}
+### Writing a function to run n simulated trials ###
+ntrial_sampling <- function(pooled_prop, n_tx, n_cl,ntrail){
+    patients.treat <- rbinom(ntrail,n_tx,pooled_prop)
+    patients.control <- rbinom(ntrail,n_cl,pooled_prop)
+
+    prop.diff <- patients.treat/n_tx - patients.control/n_cl
+
+    return(prop.diff)
+}
+
+
+par(mfrow=c(3,2))
+for (i in 1:length(Age_group)){
+  ntrail = 100000
+  diff_sampled <- with(q1_df, ntrial_sampling(pooled_prop[i],n_tx[i],n_cl[i],ntrail))
+  hist(diff_sampled,main = paste("Hist of sampled difference in",Age_group[i]))
+  abline(v=q1_df$prop_diffs[i],col = "red")
+}
+
+```
+
+
+From the results of the previous problem, the TFD725+docetaxel did not show more effective than docetaxel alone except for the 50+ and 60+ age group. We could fit a linear regression model of the treatment and age with interaction on obstime, to observe if the coefficient on the interaction term is 0. If the interaction term is 0, it shows that treatment effects does not substantively differ across age. 
+
+We fitted the model described above, and got a coefficient of -0.682. To further test it, we could permute on the age, and run the test multiple times to confirm our guess. 
+
+```{r}
+
+lm1_inter <- lm(obstime~tx*age, data = data)
+lm1_coef <- coef(lm1_inter)[4]
+
+perm_trial <- function(dat){
+  perm_indx <- sample(1:nrow(dat), replace = FALSE)
+  perm_dat <- dat
+  perm_dat$age <- dat$age[perm_indx]
+  perm_coef <- coef(lm(obstime~tx*age, data = perm_dat))[4]
+  return(perm_coef)
+}
+
+```
+
+With 1000 permutations on age, we could calculate the tail probability of observing the treatment effect as least as extreme as our original data. We got 0.421, thus we could not reject the null that there is no difference in treatment effect across age. We could also see it from the histogram below, that most of our results from permutations lie around 0. 
+
+```{r}
+
+perm_trials <- replicate(1000, perm_trial(data))
+
+df_perm_trials <- data.frame(perm_trials)
+
+
+tail_prob_slope <- min(mean(lm1_coef <= perm_trials),mean(lm1_coef >= perm_trials))
+
+hist(perm_trials,xlab = "permute coefs") 
+abline(v = lm1_coef,col = "red")
+
+
+
+
+
+```
+

@@ -1,0 +1,204 @@
+---
+title: "BIOST544_HW4"
+author: "Qin Li"
+date: "12/7/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+library(haven)
+library(knitr)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+getwd()
+```
+
+
+First we read in the SWAN data, and select a few variables that might both associated with smoking and bone density. We select age, income and alcohol drinking within a month. To deal with the missing data, we used the "na.omit" function to treat missing value as completely at random. Then we only consider the smoking status as yes or no, omit other labels, and change income and alcohol as factors. 
+
+```{r data.clean}
+
+swan <- read_dta("./SWANdata_visit0/28762-0001-Data.dta")
+
+swan.use <- swan %>% select(AGE0,HPBMDT0,SPBMDT0,SMOKERE0,
+                            INCOME0,ALCHMON0) %>% na.omit()
+
+swan.complete <- swan.use %>% filter(SMOKERE0 > 0,INCOME0 >0)
+swan.dichot <- swan.complete %>% mutate(smoking = ifelse(SMOKERE0 ==2,1,0),
+                                        income = as.factor(INCOME0),
+                                        alcoh = as.factor(ALCHMON0))
+
+
+hpb.by.smoking <- swan.dichot %>% 
+   dplyr::group_by(as.factor(smoking)) %>% 
+   dplyr::summarise(prop.inf = mean(HPBMDT0))
+kable(hpb.by.smoking)
+spb.by.smoking <- swan.dichot %>% 
+   dplyr::group_by(as.factor(smoking)) %>% 
+   dplyr::summarise(prop.inf = mean(SPBMDT0))
+kable(spb.by.smoking)
+
+(hpb.mean.diff <- hpb.by.smoking$prop.inf[2] - hpb.by.smoking$prop.inf[1])
+(spb.mean.diff <- spb.by.smoking$prop.inf[2] - spb.by.smoking$prop.inf[1])
+```
+
+Next, we could run a permutation test on significance of the outcome on hip bone density and spinal bone density separately. 
+
+```{r perm}
+do.one <- function(outcome, label){
+  perm.label <- sample(label)
+  return(mean(outcome[perm.label == 1]) - mean(outcome[perm.label == 0]))
+}
+
+set.seed(1)
+hpb.sampling.dist <- with(swan.dichot,
+                      replicate(1e4, do.one(HPBMDT0, smoking)))
+spb.sampling.dist <- with(swan.dichot,
+                      replicate(1e4, do.one(SPBMDT0, smoking)))
+  
+ggplot(data.frame(permhpb.mean.diff = hpb.sampling.dist), 
+       aes(x = permhpb.mean.diff, y=..density..)) +
+  geom_density() + 
+  geom_vline(xintercept = hpb.mean.diff, color = "red")
+(p.val.hpb <- mean(hpb.sampling.dist > hpb.mean.diff))
+
+ggplot(data.frame(permspb.mean.diff = spb.sampling.dist), 
+       aes(x = permspb.mean.diff, y=..density..)) +
+  geom_density() + 
+  geom_vline(xintercept = spb.mean.diff, color = "blue")
+
+
+(p.val.spb <- mean(spb.sampling.dist > spb.mean.diff))
+
+```
+
+From the permutation test, we could see that only the effect of hip bone density effect is strong enough that it is unlikely due to chance. 
+
+Whereas based on the permutation test on spinal bone density, the effect is likely due to chance. 
+
+There are also possibles that there are other variables that correlates with smoking that are also correlates with the bone density. In this case, we could use propensity score/inverse probability weighting to account for other variables that could affect both smoking and bone density. 
+
+Now, we are considering the confounding variables, including age, income and alcohol (in a month). Since our outcome is binary, a logistic regression model is appropriate to start with. 
+
+```{r confound}
+propen.model <- glm(smoking ~ AGE0+income+alcoh, family=binomial, data=swan.dichot)
+
+propensities <- predict(propen.model, data=swan.dichot, type="response")
+
+ggplot(data.frame(propensities=propensities, smoking=swan.dichot$smoking), 
+       aes(x = propensities, y = ..density.., color = smoking)) + geom_density()
+
+range(propensities)
+
+```
+0.2501236 0.7126137
+
+Since the propensity scores on both ends are away from 0 and 1, so we do not need to truncate the propensity score. 
+
+Now we could take a look at our enrollment probabilities
+
+```{r propensity}
+npat <- nrow(swan.dichot)
+weights <- rep(0, npat)
+
+## for patients who smoke:
+representative.propen <- sum(swan.dichot$smoking) / npat
+actual.propen <- propensities
+
+smoke.ind <- which(swan.dichot$smoking == 1)
+weights[smoke.ind] <- representative.propen/actual.propen[smoke.ind]
+weights[-smoke.ind]<- (1 - representative.propen)/(1 - actual.propen[-smoke.ind])
+
+ggplot(data.frame(weights = weights), aes(x=weights, y =..density..)) + 
+  geom_histogram()
+
+```
+
+Get the new estimate by taking account of the inverse weight of these probabilities
+
+```{r prob.est}
+hpb.smoking.prob.est <- with(swan.dichot,
+                         mean((weights*HPBMDT0)[smoke.ind]))
+hpb.nonsmoking.prob.est <- with(swan.dichot,
+                             mean((weights*HPBMDT0)[-smoke.ind]))
+
+(hpb.diff.est <- hpb.smoking.prob.est - hpb.nonsmoking.prob.est)
+
+
+
+spb.smoking.prob.est <- with(swan.dichot,
+                         mean((weights*SPBMDT0)[smoke.ind]))
+spb.nonsmoking.prob.est <- with(swan.dichot,
+                             mean((weights*SPBMDT0)[-smoke.ind]))
+
+(spb.diff.est <- spb.smoking.prob.est - spb.nonsmoking.prob.est)
+```
+
+```{r confounding}
+do.one.propen <- function(outcome, propen){
+  n <- length(outcome)
+  label <- rbinom(n,1,propen)
+
+  weights <- rep(0,n)  
+  representative <- mean(label)
+  actual <- propen
+  ind.t <- which(label == 1)
+  weights[ind.t] <- (representative/actual)[ind.t]
+  weights[-ind.t] <- ((1-representative)/(1-actual))[-ind.t]
+  
+  return(mean((weights*outcome)[ind.t]) - mean((weights*outcome)[-ind.t]))
+}
+
+set.seed(2)
+hpb.rerandomized.diffs <- 
+  replicate(1e3, do.one.propen(swan.dichot$HPBMDT0, propensities))
+
+ggplot(data.frame(diffs = hpb.rerandomized.diffs), aes(x = diffs, y = ..density..)) +
+  geom_density() + 
+  geom_vline(xintercept = hpb.diff.est, color = "red")
+
+mean(hpb.rerandomized.diffs > hpb.diff.est)
+
+spb.rerandomized.diffs <- 
+  replicate(1e3, do.one.propen(swan.dichot$SPBMDT0, propensities))
+
+ggplot(data.frame(diffs = spb.rerandomized.diffs), aes(x = diffs, y = ..density..)) +
+  geom_density() + 
+  geom_vline(xintercept = spb.diff.est, color = "red")
+
+mean(spb.rerandomized.diffs > spb.diff.est)
+
+```
+
+After adjusting for the confounding, the differences between smoking and nonsmoking seems not significant for both hip bone density and spinal bone density. With 1000 times randomization on the same test, the p value turns out as 0.363 and 0.435 for hip bone density and spinal bone density, respectively. It is relatively safe to say that we fail to reject our null hypothesis that there are no difference in smoking status on bone density. The results are very different from the test we did without any confounding. We assume that the confounding variables effect largely on smoking and bone density. 
+
+
+
+```{r hpb.standarization}
+hpb.outcome.regression <- lm(HPBMDT0 ~ AGE0+income+alcoh + smoking, data=swan.dichot)
+spb.outcome.regression <- lm(SPBMDT0 ~ AGE0+income+alcoh + smoking, data=swan.dichot)
+swan.smoker <- swan.dichot %>% mutate(smoking == 1)
+swan.nonsmoker <- swan.dichot %>% mutate(smoking == 0)
+
+(hpb.standardized.est <- mean(  predict(hpb.outcome.regression, 
+                                   swan.smoker, 
+                                   type = "response") -
+                             predict(hpb.outcome.regression, 
+                                     swan.nonsmoker, 
+                                     type = "response")))
+
+(spb.standardized.est <- mean(  predict(spb.outcome.regression, 
+                                   swan.smoker, 
+                                   type = "response") -
+                             predict(spb.outcome.regression, 
+                                     swan.nonsmoker, 
+                                     type = "response")))
+
+
+```
+
+Both standardization tests returns a value of 0. We believe that we do not have the enough information to support our hypothesis we had on smoking status on bone density. 
+
+

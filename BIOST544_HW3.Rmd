@@ -1,0 +1,110 @@
+---
+title: "BIOST544_hw3"
+author: "Qin Li"
+date: "11/15/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+getwd()
+options(digits = 3) ## Formats output to 3 digits
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(data.table)
+library(glmnet)
+```
+
+
+First we'll have to read in data from the "clinical_data.csv" and "expression_data_probeID.csv", and merge them together based on their patid. 
+
+By selecting the top 50 highest correlation of genes and necrotic cell percentage, we could add one gene one by one until we reach a lowest MSE using linear model. It turns out that the model produces the minimum MSE is choosing the top 29 genes with the rank of correlation. 
+
+
+```{r data_load}
+# read in clinical data
+clinical <- read.csv("clinical_data.csv", header=TRUE)[,-1]
+
+# read in expression data probeid
+expression <- read.csv("expression_data_probeID.csv", header=TRUE)[,-1]
+
+
+if(typeof(expression$patid) != typeof(clinical$patid)){
+  exp.keep$centerid <- as.numeric(exp.keep$centerid)
+  exp.keep$patid <- as.numeric(exp.keep$patid)
+}
+
+
+clinical.use <- clinical %>% select(centerid, patid, necrotic_cells.pct)
+
+NOAH <- inner_join(expression, clinical.use, by=c("centerid","patid"))
+
+# extract all the genes excluding the center id, patietn id and the necrotic_cells pct
+genes <- NOAH %>% select(-c("centerid","patid","necrotic_cells.pct"))
+
+# find out the correlation between each gene and necrotic_cells pct
+gene.cors <- apply(genes, 2, cor, NOAH$necrotic_cells.pct)
+
+# match the correlation iwth gene's name
+df.gene <- data.frame(cors=gene.cors, gene.id=colnames(genes))
+
+# find the id of the top 50 highest correlation of gene with necrotic cells pct
+
+corsidx.top50 <- sort(abs(df.gene$cors), decreasing = T,index.return = T)$ix[1:50]
+
+## Function for evaluating the fit of a model on test data
+eval.my.model <- function(data, mod){
+  preds <- predict(mod, data)
+  MSE <- mean((data$necrotic_cells.pct - preds)^2) 
+  return(MSE)
+}
+
+
+set.seed(954)
+ids <- sample(1:nrow(NOAH), size = floor(nrow(NOAH)*0.7))
+
+MSE.mat <- rep(NA,50)
+for (i in 1:50){
+  pick <- corsidx.top50[1:i]
+  picks <- cbind(NOAH$necrotic_cells.pct, genes[,pick])
+  df.pick <- as.data.frame(picks)
+  colnames(df.pick)[1] <- "necrotic_cells.pct"
+  mod <- lm(necrotic_cells.pct~., data = df.pick[ids,])
+  MSE.mat[i] <- eval.my.model(df.pick[-ids,], mod)
+}
+optimal.num <- which.min(MSE.mat)
+
+optimal.subset <- genes[corsidx.top50[1:optimal.num]]
+final.mat <- as.data.frame(cbind(NOAH$necrotic_cells.pct, optimal.subset))
+colnames(final.mat)[1] <- "necrotic_cells.pct"
+final.mod <- lm(necrotic_cells.pct~., data = final.mat)
+
+```
+
+We could do a feature selection using the lasso regression. The number of non-zero coefficients are the number of genes that are relevant to gene expression. We first use cross validation on the top 100 correlated genes with necrotic_cell.pct, and choose the lambda that gives the smallest mean cross-validation error. We then use the optimal lambda to fit the whole data. We have 126 variables' coefficients that are nonzero. Thus we might need 137 genes to study the relationship between gene-expression values in the tumor and the existence and extent of necrotic tissue.
+
+```{r lasso}
+
+# find the top 100 highest correlation of gene with necrotic cells pct
+
+genes.top100 <- df.gene[order(df.gene$cors, decreasing = T),][1:100,]
+
+genes.mat <- as.matrix(cbind(NOAH$necrotic_cells.pct,NOAH[,names(NOAH) %in% genes.top100$gene.id]))
+
+set.seed(300)
+# fit it on the top 50 highly correlated genes with necrotic_cells.pct
+nlambda = 100
+fit.cv <- cv.glmnet(x=genes.mat[,-1], y=genes.mat[,1],alpha=1,nlambda = nlambda)
+lambda.optimal <- fit.cv$lambda.min
+
+# fit the full model with the best lambda from previous model
+fit.cv.full <- glmnet(x=genes, y=NOAH$necrotic_cells.pct ,alpha=1,lambda = lambda.optimal)
+
+# find the number of variable selected using the lasso regression 
+sum(coef(fit.cv.full, s = "lambda.min") != 0) 
+
+
+```
+
+

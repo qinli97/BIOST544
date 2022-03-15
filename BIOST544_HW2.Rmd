@@ -1,0 +1,129 @@
+---
+title: "BIOST544_HW2"
+author: "Qin Li"
+date: "10/29/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+getwd()
+```
+
+## 1.
+
+
+We will first write a function that takes in the data, and inside the function, we permute the data one time, calculate the mean outcome difference (proportion) between the treatment and control group. 
+
+We then write another function that takes in data and n trials. The function will simulate the first function n times, and get a distribution of simulated mean differences. We than take the original mean difference, calculate the tail probability of that original mean difference on the simulated distribution. 
+
+```{r}
+# read in the data
+df1 <- read.delim(file = "HW2-adaptive-trial.txt", header = TRUE,sep = ",")
+
+
+sim.perm.trial <- function(data){
+  # permute the data
+  perm <- sample(1:nrow(data), replace = FALSE)
+  perm.data <- data
+  perm.data$tx <- data$tx[perm]
+
+  # calculate the proportion difference in treatment and control group
+  perm.mean.diff <- with(perm.data, mean(outcome[tx==1])-mean(outcome[tx==0]))
+  return(perm.mean.diff)
+}
+
+perm.test <- function(data,ntrial){
+  # calculate the mean difference in the data
+  sim.mean.diff <- replicate(ntrial, sim.perm.trial(data))
+  mean.diff <- with(data, mean(outcome[tx==1])-mean(outcome[tx==0]))
+  pval = mean(sim.mean.diff >= mean.diff)
+  return(list(pval=pval,sim.diff =sim.mean.diff))
+}
+
+```
+
+
+
+## 2. 
+
+### 2a.
+The first function takes in the data, and output a mean difference between the treatment and control group. The probability of getting treatment is updated with the number of success in treatment and failures in control group for each patient get into the trial. So we have to keep track of the two numbers mentioned above. 
+
+The second functions takes in data, n trials, and output a tail probability of the mean difference (in the adaptive data generated from the previous function ) on a distribution of simulated mean difference. 
+
+```{r}
+rand.onetrial <- function(data){
+  
+  n.succ <- 0
+  n.fail <- 0
+  new.gen <- matrix(NA,nrow =dim(data)[1] ,ncol = 2)
+  pnew = 0.5
+  # df.perm = data
+  # df.perm$order = sample(1:nrow(data),replace = F)
+  new.gen[,2] = data[,2]
+  for (i in 1:nrow(data)){
+    tx.prob <- rbinom(1,1,pnew)
+    new.gen[i,1] = tx.prob
+    #outcm = df.perm$outcome[df.perm$order == i]
+    #new.gen[i,2] = outcm
+    if (tx.prob == 1 & new.gen[i,2]== 1){
+      n.succ <- n.succ + 1
+    }
+    if (tx.prob == 0 &new.gen[i,2] == 0){
+      n.fail = n.fail + 1
+      }
+    
+    pnew <- (1+3*(n.succ+n.fail))/(2+3*i)
+  
+  }
+  new.gen <- data.frame(new.gen)
+  colnames(new.gen) <- c("tx","outcome")
+  mean.diff <- with(new.gen, mean(outcome[tx==1])-mean(outcome[tx==0]))
+  return(mean.diff)
+}
+
+rand.multi.trial <- function(data,ntrial){
+  pool.diff <- with(data, mean(outcome[tx==1])-mean(outcome[tx==0]))
+  simulate.mean.diffs <- replicate(ntrial,rand.onetrial(data))
+  pval <- mean(simulate.mean.diffs >= pool.diff)
+  hist(simulate.mean.diffs )
+  abline(v = pool.diff, col = "red")
+  return(list(pval =pval,sim.diff = simulate.mean.diffs))
+}
+```
+
+### 2b.
+
+From the tail probability, we could say that the data are consistent with the hypohtesis that standard-of-care is at least as effective as the new treatment. 
+
+```{r q2b}
+set.seed(1)
+new.model <- rand.multi.trial(df1,10000)
+
+new.model$pval
+```
+
+
+## 3. 
+
+From the plot on the distributions of mean differences simulated from the two models, the old model looks weird. The distribution of the old wiggles, with the highest peak around 0, which is similar to the new model where it also peaked around 0. The shape of the new model is smoother. 
+
+```{r q3}
+ntrial = 1e4
+old.model <- perm.test(df1,ntrial)
+
+dfq3 <- data.frame(diffs = c(old.model$sim.diff,new.model$sim.diff),
+                   mod = c(rep("old",ntrial),rep("new",ntrial)))
+ggplot(dfq3, aes(x = diffs, y =..density.., color = mod)) + geom_density()
+```
+
+
+
+
+
+
+
+

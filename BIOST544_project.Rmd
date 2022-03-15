@@ -1,0 +1,61 @@
+---
+title: "BIOST544_project"
+author: "Qin Li"
+date: "11/13/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+getwd()
+data2016 <- load("NSDUH_2016.RData")
+library(dplyr)
+```
+
+```{r cars}
+preg2016 <- PUF2016_022818 %>% filter(pregnant == 1)
+preg2016 <- preg2016 %>% select(spdmon,NEWRACE2,CATAG3,irmarit,HEALTH2,eduhighcat,WRKSTATWK2,income,illmon)
+preg2016 <- na.omit(preg2016)
+preg2016 %>% nrow()
+head(preg2016)
+
+write.csv(preg2016, file = "preg2016.csv")
+```
+
+
+```{r factor}
+preg_all <- read.csv("preg_all.csv")
+preg_all <- preg_all[,-c(1,2)]
+#preg_all$spdmon = as.factor(preg_all$spdmon)
+preg_all$NEWRACE2 = as.factor(preg_all$NEWRACE2)
+preg_all$CATAG3 = as.factor(preg_all$CATAG3)
+preg_all$irmarit = as.factor(preg_all$irmarit)
+preg_all$HEALTH2 = as.factor(preg_all$HEALTH2)
+preg_all$eduhighcat = as.factor(preg_all$eduhighcat)
+preg_all$jobstat = as.factor(preg_all$jobstat)
+preg_all$illmon = as.factor(preg_all$illmon)
+preg_all$income = as.factor(preg_all$income)
+
+
+```
+
+
+```{r lasso}
+
+set.seed(1)
+library(glmnet)
+preg.mat <- as.matrix(preg_all) ## glmnet requires the design matrix to be a matrix object
+
+presence.absence <- (preg_all$spdmon == 0)
+
+sum(coef(cv.fit, s = "lambda.min") != 0) ## number of features included in the optimal model
+
+cv.fit$cvm[which(cv.fit$lambda == cv.fit$lambda.min)] ## optimal error
+
+cv.fit$cvm[1] ## error of intercept only model
+
+(prop.remaining <- cv.fit$cvm[which(cv.fit$lambda == cv.fit$lambda.min)] /
+                      cv.fit$cvm[1]) ## proportion of variability remaining
+
+
+```
